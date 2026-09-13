@@ -1,43 +1,19 @@
--- gramarye/ui.lua — primitive UI component library for gramarye-ui (Clay + raylib).
---
--- Shipped embedded inside gramarye-ui and versioned with the C ABI: pinning a
--- gramarye-ui tag pins this layer too. Load it with:
---
---   local ui = gramarye.require("gramarye.ui")
---
--- SCOPE: genre-agnostic *primitives* only — layout, text, button, panel, image,
--- scroll, modal. Game-domain widgets (inventory slots, item cards, trade rows,
--- settings rows, …) belong in the game, composed on top of these primitives and
--- wired to the game's own ECS/event systems. Keep this file free of game concepts.
---
--- Components return pure Lua tables (element trees). Call gramarye.ui.render(tree)
--- inside on_draw to push them into Clay. Hover state (gramarye.ui.hovered) lags
--- one frame — imperceptible at 60 fps. Skins/image bindings live in the theme
--- module; override them there to reskin without forking:
---   local theme = gramarye.require("gramarye.theme")
-
 local theme = require("gramarye.theme")
+local anim  = require("gramarye.anim")
 
 local M = {}
 
--- ─── Platform ─────────────────────────────────────────────────────────────────
 local is_mobile = gramarye.platform == "android"
 
--- Re-exported so call sites can read ui.skins / ui.MIN_TAP_H.
 M.skins     = theme.skins
 M.MIN_TAP_H = theme.MIN_TAP_H
 
--- Image fields ({nine=}/{tex=}) bound to a skin name, or nil for color-only.
 local function image_for(skin_name)
     local img = theme.images[skin_name]
     if not img then return nil end
     return img.nine, img.tex
 end
 
--- ─── Primitive nodes ──────────────────────────────────────────────────────────
--- These map 1:1 to Clay element types. Children are the array part of props.
-
--- Frame: generic container with optional id, bg, radius, border, layout, events.
 function M.Frame(props)
     local node = { _type = "frame" }
     for k, v in pairs(props) do
@@ -46,7 +22,6 @@ function M.Frame(props)
     return node
 end
 
--- Text node. Can also be called as Text("string") for quick labels.
 function M.Text(props)
     if type(props) == "string" then
         return { _type = "text", text = props }
@@ -60,25 +35,18 @@ function M.Text(props)
     }
 end
 
--- Image node: a texture or nine-patch background. `nine`/`tex` are ids from
--- gramarye.ui.ninepatch / gramarye.ui.load_texture. Behaves like a Frame (id,
--- layout, events all work), so it can hold children.
 function M.Image(props)
     local node = { _type = "image" }
     for k, v in pairs(props) do node[k] = v end
     return node
 end
 
--- Scrollable frame (v_scroll=true by default).
 function M.ScrollFrame(props)
     local node = { _type = "scroll" }
     for k, v in pairs(props) do node[k] = v end
     return node
 end
 
--- ─── Layout primitives ────────────────────────────────────────────────────────
-
--- Horizontal row of children.
 function M.Row(props)
     local node = {
         _type  = "frame",
@@ -100,7 +68,6 @@ function M.Row(props)
     return node
 end
 
--- Vertical column of children.
 function M.Column(props)
     local node = {
         _type  = "frame",
@@ -123,7 +90,6 @@ function M.Column(props)
     return node
 end
 
--- Grows to fill remaining space; pass a number for a fixed gap instead.
 function M.Spacer(size)
     if size and size > 0 then
         return { _type = "frame", layout = { w = size, h = size } }
@@ -131,7 +97,6 @@ function M.Spacer(size)
     return { _type = "frame", layout = { w = { grow = true }, h = { grow = true } } }
 end
 
--- Thin horizontal/vertical separator line.
 function M.Separator(props)
     props = props or {}
     local s = theme.skins.separator
@@ -146,9 +111,6 @@ function M.Separator(props)
     }
 end
 
--- ─── Text primitives ──────────────────────────────────────────────────────────
-
--- Styled label (shorthand for Text with a skin).
 function M.Label(props)
     if type(props) == "string" then
         local s = theme.skins.label
@@ -164,7 +126,6 @@ function M.Label(props)
     }
 end
 
--- Large heading text.
 function M.Title(props)
     if type(props) == "string" then
         local s = theme.skins.title
@@ -179,41 +140,49 @@ function M.Title(props)
     }
 end
 
--- ─── Interactive / container primitives ───────────────────────────────────────
-
--- Styled button with hover skin, adaptive touch target. Uses a nine-patch /
--- texture skin when one is bound for its skin name, otherwise the color skin.
 function M.Button(props)
-    local hov    = gramarye.ui.hovered(props.id)
-    local s_name = hov and (props.hover_skin or props.skin and (props.skin.."_hover") or "button_hover")
-                       or (props.skin or "button")
-    local s      = theme.skins[s_name] or theme.skins.button
-    local h      = math.max(props.h or 40, M.MIN_TAP_H)
-    local nine, tex = image_for(s_name)
+    local hov       = gramarye.ui.hovered(props.id)
+    local off_name  = props.skin or "button"
+    local hov_name  = props.hover_skin or (props.skin and (props.skin.."_hover")) or "button_hover"
+    local s_off     = theme.skins[off_name] or theme.skins.button
+    local s_hov     = theme.skins[hov_name] or s_off
+    local h         = math.max(props.h or 40, M.MIN_TAP_H)
+    local nine, tex = image_for(hov and hov_name or off_name)
+
+    local bg, text_color
+    if nine or tex then
+        local s = hov and s_hov or s_off
+        bg, text_color = nil, props.text_color or s.text
+    else
+        local t = anim.towards(props.id, hov and 1 or 0, 14)
+        bg         = anim.lerp_color(s_off.bg or {0,0,0,0}, s_hov.bg or s_off.bg or {0,0,0,0}, t)
+        text_color = props.text_color or anim.lerp_color(
+            s_off.text or {255,255,255,255}, s_hov.text or s_off.text or {255,255,255,255}, t)
+    end
+
     return {
         _type    = (nine or tex) and "image" or "frame",
         id       = props.id,
-        bg       = (not (nine or tex)) and (props.bg or s.bg) or nil,
+        bg       = (not (nine or tex)) and (props.bg or bg) or nil,
         nine     = nine,
         tex      = tex,
-        radius   = props.radius or s.radius,
+        radius   = props.radius or s_off.radius,
         layout   = {
             w     = props.w or { fit = true },
             h     = h,
             align = "center",
-            pad   = props.pad or s.pad,
+            pad   = props.pad or s_off.pad,
         },
         on_click = props.on_click,
         on_hover = props.on_hover,
         { _type = "text",
           text  = props.label or props.text or "",
-          size  = props.font_size or s.font_size,
-          color = props.text_color or s.text,
+          size  = props.font_size or s_off.font_size,
+          color = text_color,
           font  = props.font or 0 },
     }
 end
 
--- Styled container with column layout by default. Image-skinnable.
 function M.Panel(props)
     local s_name    = props.skin or "panel"
     local s         = theme.skins[s_name]
@@ -238,7 +207,6 @@ function M.Panel(props)
     return node
 end
 
--- Full-screen overlay (modal backdrop), with content centred.
 function M.Overlay(props)
     local node = {
         _type  = "frame",
@@ -250,12 +218,6 @@ function M.Overlay(props)
     return node
 end
 
--- ─── Tooltip ──────────────────────────────────────────────────────────────────
--- A floating bubble attached to a target element, shown only while it's hovered.
---   ui.Tooltip { to_id = "save_btn", text = "Save the game" }
--- Place it anywhere the target id is also declared this frame (e.g. at the end of
--- the root). Always returns a (possibly empty) floating node — never nil — so it
--- is safe to drop into a children array without truncating siblings.
 function M.Tooltip(props)
     local target = props.to_id or props.target
     local node = {
@@ -266,7 +228,7 @@ function M.Tooltip(props)
             x           = props.x or 0,
             y           = props.y or 6,
             z           = props.z or 1000,
-            passthrough = true,   -- never steal hover from the target
+            passthrough = true,
         },
     }
     if target and gramarye.ui.hovered(target) then
@@ -284,23 +246,269 @@ function M.Tooltip(props)
     return node
 end
 
--- ─── Virtualized, pull-model List & Grid ──────────────────────────────────────
--- Data stays in the game's C/ECS code: pass a row `count` and a `cell(i)` callback
--- that reads row i. Only the rows visible in the scroll viewport are laid out, so
--- a 100k-row list costs ~viewport-many cell() calls per frame. Indices are 1-based.
+local function point_on_rect(x, y, w, h, d)
+    local perim = 2 * (w + h)
+    if perim <= 0 then return x, y end
+    d = d % perim
+    if d < w then                     return x + d,               y
+    elseif d < w + h then             return x + w,                y + (d - w)
+    elseif d < w + h + w then         return x + w - (d - w - h),  y + h
+    else                              return x,                    y + h - (d - w - h - w)
+    end
+end
+
+local function glow_falloff(d, center, perim, band_px)
+    local delta = (d - center + perim / 2) % perim - perim / 2
+    if delta < -band_px or delta > band_px then return 0 end
+    return 0.5 * (1 + math.cos(math.pi * delta / band_px))
+end
+
+function M.BorderPulse(props)
+    local x, y, w, h = props.x, props.y, props.w, props.h
+    if not (x and y and w and h) or w <= 0 or h <= 0 then
+        return { _type = "frame", layout = { w = 0, h = 0 } }
+    end
+    local base  = props.base  or { 60, 60, 90, 255 }
+    local glow  = props.glow  or { 255, 255, 255, 255 }
+    local speed = props.speed or 60
+    local band  = props.band  or 0.14
+    local step  = props.step  or 5
+    local width = props.width or 3
+    local z     = props.z or 850
+
+    local perim   = 2 * (w + h)
+    local band_px = math.max(band * perim, 1)
+    local head1   = (gramarye.ui.time() * speed) % perim
+    local head2   = (head1 + perim / 2) % perim
+    local seg_sz  = math.max(width, step * 1.4)
+
+    local node = { _type = "frame", layout = { w = 0, h = 0 } }
+    local n = 0
+    local count = math.min(math.floor(perim / step), 400)
+    for i = 0, count - 1 do
+        local d = i * step
+        local t = math.max(glow_falloff(d, head1, perim, band_px),
+                            glow_falloff(d, head2, perim, band_px))
+        if t > 0.02 then
+            local px, py = point_on_rect(x, y, w, h, d)
+            n = n + 1
+            node[n] = {
+                _type    = "frame",
+                bg       = { base[1] + (glow[1]-base[1])*t,
+                             base[2] + (glow[2]-base[2])*t,
+                             base[3] + (glow[3]-base[3])*t,
+                             base[4] + (glow[4]-base[4])*t },
+                radius   = seg_sz / 2,
+                floating = { to = "root", x = px - seg_sz / 2, y = py - seg_sz / 2,
+                             z = z, passthrough = true },
+                layout   = { w = seg_sz, h = seg_sz },
+            }
+        end
+    end
+    return node
+end
+
+local beam_slots     = {}
+local beam_next_slot = 0
+
+local function beam_slot_for(id)
+    local slot = beam_slots[id]
+    if not slot then
+        slot = beam_next_slot
+        beam_next_slot = beam_next_slot + 1
+        beam_slots[id] = slot
+    end
+    return slot
+end
+
+function M.BorderBeam(props)
+    local x, y, w, h = props.x, props.y, props.w, props.h
+    if not (x and y and w and h) or w <= 0 or h <= 0 then
+        return { _type = "frame", layout = { w = 0, h = 0 } }
+    end
+    local slot = beam_slot_for(props.id or "borderbeam")
+
+    gramarye.ui.set_border_beam(slot, {
+        beam         = props.beam or { 255, 255, 255, 255 },
+        base         = props.base or { 60, 60, 90, 255 },
+        radius       = props.radius or 8,
+        border_width = props.border_width or 1,
+        speed        = props.speed or 60,
+        glow_radius  = props.glow_radius or 40,
+    })
+
+    return {
+        _type    = "custom",
+        kind     = gramarye.ui.border_beam_kind(slot),
+        floating = { to = "root", x = x, y = y, z = props.z or 850, passthrough = true },
+        layout   = { w = w, h = h },
+    }
+end
+
+local popup_state = {}
+
+function M.Popup(props)
+    local id = props.id
+    local st = popup_state[id]
+    if not st then
+        st = { x = props.x or 40, y = props.y or 40, dragging = false,
+               grab_dx = 0, grab_dy = 0, was_down = false }
+        popup_state[id] = st
+    end
+
+    local bar_id      = id .. "_titlebar"
+    local mx, my      = gramarye.ui.mouse_pos()
+    local down        = gramarye.ui.mouse_down()
+
+    if not down then
+        st.dragging = false
+    elseif st.dragging then
+        st.x = mx - st.grab_dx
+        st.y = my - st.grab_dy
+    elseif not st.was_down and gramarye.ui.hovered(bar_id) then
+        st.dragging = true
+        st.grab_dx  = mx - st.x
+        st.grab_dy  = my - st.y
+    end
+    st.was_down = down
+
+    local w  = props.w or 320
+    local sw, sh = gramarye.ui.screen_w(), gramarye.ui.screen_h()
+    st.x = math.max(-(w - 40), math.min(st.x, sw - 40))
+    st.y = math.max(0, math.min(st.y, sh - 24))
+
+    local s = theme.skins.popup
+    local r = props.radius or s.radius
+
+    local bar = {
+        _type  = "frame",
+        id     = bar_id,
+        bg     = s.bar_bg,
+        radius = { tl = r, tr = r, bl = 0, br = 0 },
+        layout = { w = { grow = true }, h = 32, pad = { h = 10, v = 0 },
+                   gap = 8, align = { y = "center" } },
+        { _type = "text", text = props.title or "", size = s.title_size,
+          color = s.title_color },
+        M.Spacer(),
+    }
+    if props.on_close then
+        bar[#bar + 1] = {
+            _type    = "frame",
+            id       = id .. "_close",
+            layout   = { w = 20, h = 20, align = "center" },
+            on_click = props.on_close,
+            { _type = "text", text = "x", size = 15, color = s.title_color },
+        }
+    end
+
+    local body = {
+        _type  = "frame",
+        layout = { dir = "column", w = { grow = true }, h = props.body_h,
+                   pad = props.pad or 12, gap = props.gap or 8 },
+    }
+    for i, v in ipairs(props) do body[i] = v end
+
+    local win = {
+        _type    = "frame",
+        id       = id,
+        bg       = props.bg or s.bg,
+        radius   = props.radius or s.radius,
+        border   = { color = s.border, width = 1 },
+        floating = { to = "root", x = st.x, y = st.y, z = props.z or 400 },
+        layout   = { dir = "column", w = w, h = props.h },
+        bar, body,
+    }
+    if not props.pulse then return win end
+
+    local pp = type(props.pulse) == "table" and props.pulse or {}
+    local rx, ry, rw, rh = gramarye.ui.element_rect(id)
+    return {
+        _type = "frame", layout = { w = 0, h = 0 },
+        win,
+        M.BorderBeam {
+            id = id, x = rx, y = ry, w = rw, h = rh, radius = r,
+            base = pp.base or s.border, beam = pp.beam,
+            speed = pp.speed, glow_radius = pp.glow_radius,
+            border_width = pp.border_width, z = pp.z,
+        },
+    }
+end
+
+local dropdown_open = {}
+
+function M.Dropdown(props)
+    local id    = props.id
+    local items = props.items or {}
+    local open  = dropdown_open[id] or false
+    local hov   = gramarye.ui.hovered(id)
+    local s     = theme.skins[hov and "dropdown_hover" or "dropdown"]
+    local h     = math.max(props.h or 36, M.MIN_TAP_H)
+    local label = items[props.selected] or props.placeholder or ""
+
+    local trigger = {
+        _type  = "frame",
+        id     = id,
+        bg     = s.bg,
+        radius = s.radius,
+        border = { color = s.border, width = 1 },
+        layout = { w = props.w or 200, h = h, pad = s.pad,
+                   align = { y = "center" }, gap = 8 },
+        on_click = function() dropdown_open[id] = not open end,
+        { _type = "text", text = label, size = props.font_size or s.font_size,
+          color = s.text },
+        M.Spacer(),
+        { _type = "text", text = open and "^" or "v",
+          size = props.font_size or s.font_size, color = s.text },
+    }
+    if not open then return trigger end
+
+    local ls = theme.skins.dropdown_list
+    local rows = { _type = "frame", layout = { dir = "column", w = { grow = true } } }
+    for i, item in ipairs(items) do
+        local row_id  = id .. "_opt_" .. i
+        local row_hov = gramarye.ui.hovered(row_id)
+        local sel     = props.selected == i
+        rows[i] = {
+            _type  = "frame",
+            id     = row_id,
+            bg     = sel and theme.skins.dropdown_row_selected.bg
+                   or row_hov and theme.skins.dropdown_row_hover.bg
+                   or nil,
+            layout = { w = { grow = true }, h = h, pad = s.pad, align = { y = "center" } },
+            on_click = function()
+                dropdown_open[id] = false
+                if props.on_select then props.on_select(i, item) end
+            end,
+            { _type = "text", text = item, size = props.font_size or s.font_size,
+              color = s.text },
+        }
+    end
+    local list = {
+        _type    = "frame",
+        bg       = ls.bg,
+        radius   = ls.radius,
+        border   = { color = ls.border, width = 1 },
+        floating = { to_id = id, attach = { element = "left_top", parent = "left_bottom" }, z = 900 },
+        layout   = { dir = "column", w = props.w or 200 },
+        rows,
+    }
+    local backdrop = {
+        _type    = "frame",
+        floating = { to = "root", x = 0, y = 0, z = 800 },
+        layout   = { w = { grow = true }, h = { grow = true } },
+        on_click = function() dropdown_open[id] = false end,
+    }
+    return { _type = "frame", trigger, backdrop, list }
+end
 
 local function visible_window(scroll_id, total, row_h, fallback_vp)
     local off, vp = gramarye.ui.scroll_info(scroll_id)
     if not vp or vp <= 0 then vp = fallback_vp end
-    local first = math.max(1, math.floor(off / row_h))            -- 1 row of overscan
+    local first = math.max(1, math.floor(off / row_h))
     local last  = math.min(total, first + math.ceil(vp / row_h) + 1)
     return first, last
 end
 
--- List: vertical, one cell per row, with hover + selection.
---   ui.List { id="units", count=C.count(), row_h=28, h=240, selected=sel,
---             on_select=function(i) ... end,
---             cell=function(i, st) return ui.Label(C.name(i)) end }
 function M.List(props)
     local s       = theme.skins.list_row
     local count   = props.count or 0
@@ -343,10 +551,6 @@ function M.List(props)
     return node
 end
 
--- Grid: `cols` cells per row. Small grids (no `h`) render every row; give an `h`
--- to make it a virtualized scroll container.
---   ui.Grid { id="inv", count=C.count(), cols=6, cell_h=56, gap=8,
---             cell=function(i) return SlotFor(i) end }
 function M.Grid(props)
     local count   = props.count or 0
     local cols    = props.cols or 1
@@ -384,17 +588,11 @@ function M.Grid(props)
     return node
 end
 
--- ─── TextBox (single-line, controlled) ────────────────────────────────────────
--- Value lives with the caller (controlled input): pass `value`, update it in
--- `on_change`. Focus/cursor state is module-local. UTF-8 aware via Lua's utf8 lib.
---   ui.TextBox { id="name", value=state.name, placeholder="Name",
---                on_change=function(s) state.name = s end }
-
-local tb_active = nil   -- id of the focused TextBox, or nil
-local tb_cursor = {}    -- id -> cursor position (codepoints before the caret)
+local tb_active = nil
+local tb_cursor = {}
 
 local function u_len(s) return utf8.len(s) or #s end
-local function u_sub(s, i, j)               -- 1-based codepoint range, inclusive
+local function u_sub(s, i, j)
     if i < 1 then i = 1 end
     local n = u_len(s)
     if j == nil or j > n then j = n end
@@ -451,7 +649,6 @@ function M.TextBox(props)
         { _type = "text", text = shown, size = fs, font = font,
           color = is_empty and (s.placeholder or {120,120,140,255}) or (props.text_color or s.text) },
     }
-    -- Blinking caret at the cursor position (out of flow; doesn't shift the text).
     if focused and (gramarye.ui.time() % 1.0) < 0.5 then
         local before = props.password and string.rep("*", cur) or u_sub(value, 1, cur)
         local cx = select(1, gramarye.ui.measure_text(before, fs, font))
@@ -481,17 +678,9 @@ function M.TextBox(props)
     }
 end
 
--- ─── Sizing helpers ───────────────────────────────────────────────────────────
-
 function M.grow()        return { grow = true }  end
 function M.pct_w(p)      return { pct = p }       end
 function M.pct_h(p)      return { pct = p }       end
-
--- ─── Component constructor ────────────────────────────────────────────────────
--- Wrap a render function so games can build their own composite widgets on top
--- of these primitives:
---   local Slot = ui.component(function(props) return ui.Frame { ... } end)
---   Slot { id = "s1", item = ... }
 
 function M.component(render_fn)
     return function(props) return render_fn(props) end

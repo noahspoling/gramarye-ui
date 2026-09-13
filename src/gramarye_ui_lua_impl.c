@@ -1,35 +1,21 @@
-// gramarye_ui_lua_impl.c — Lua bindings for gramarye-ui.
-//
-// NOT compiled as a standalone source file. Included at the end of gramarye_ui.c
-// after CLAY_IMPLEMENTATION so Clay's static internal config allocators
-// (CLAY_TEXT_CONFIG, CLAY_SCROLL_CONFIG, CLAY_BORDER_CONFIG, etc.) are visible.
-//
-// Public surface: GramaryeUI_register_lua / GramaryeUI_dispatch_events.
-
 #include "lua.h"
 #include "lauxlib.h"
-#include "gramarye_ui/ui.h"      // texture / nine-patch registry used by the walker
+#include "gramarye_ui/ui.h"
 #include "gramarye_ui/ui_lua.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 
-// gramarye-ui's Lua std layer, embedded as byte arrays by cmake/embed_lua.cmake.
-// Defines GramaryeLuaModule + g_lua_modules[]. Only present when GRAMARYE_UI_LUA.
 #include "gramarye_ui_lua_modules.h"
-
-// ---------------------------------------------------------------------------
-// Event registry — rebuilt every frame during gramarye.ui.render() calls
-// ---------------------------------------------------------------------------
 
 #define MAX_UI_EVENTS 256
 #define MAX_HOVERED   64
 
 typedef struct {
-    char id_str[64];  // copied from Lua (Lua strings are transient on stack)
-    int  on_click;    // Lua registry ref, or LUA_NOREF
-    int  on_hover;    // Lua registry ref, or LUA_NOREF
+    char id_str[64];
+    int  on_click;
+    int  on_hover;
 } UIEventEntry;
 
 static UIEventEntry g_events[MAX_UI_EVENTS];
@@ -37,10 +23,6 @@ static int          g_event_count   = 0;
 static uint32_t     g_hovered_prev[MAX_HOVERED];
 static int          g_hovered_count = 0;
 static bool         g_ptr_was_down  = false;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 static inline Clay_String clay_cstr(const char *s) {
     return (Clay_String){ .chars = s, .length = (int32_t)strlen(s) };
@@ -58,7 +40,6 @@ static Clay_Color color_from_lua(lua_State *L, int idx) {
     return c;
 }
 
-// Number → CLAY_SIZING_FIXED, {grow=true} → GROW, {pct=n} → PERCENT, else FIT.
 static Clay_SizingAxis sizing_from_lua(lua_State *L, int idx) {
     if (lua_isnumber(L, idx))
         return CLAY_SIZING_FIXED((float)lua_tonumber(L, idx));
@@ -77,7 +58,6 @@ static Clay_SizingAxis sizing_from_lua(lua_State *L, int idx) {
     return CLAY_SIZING_FIT(0, 0);
 }
 
-// Attach-point name ("left_top", "center_bottom", …) → Clay enum. Default top-left.
 static Clay_FloatingAttachPointType attach_point_from_name(const char *n) {
     if (!n) return CLAY_ATTACH_POINT_LEFT_TOP;
     if (strcmp(n, "left_top")      == 0) return CLAY_ATTACH_POINT_LEFT_TOP;
@@ -92,9 +72,63 @@ static Clay_FloatingAttachPointType attach_point_from_name(const char *n) {
     return CLAY_ATTACH_POINT_LEFT_TOP;
 }
 
-// ---------------------------------------------------------------------------
-// Tree walker — visits Lua element tree and calls Clay
-// ---------------------------------------------------------------------------
+static void parse_floating(lua_State *L, int idx, Clay_ElementDeclaration *decl) {
+    lua_getfield(L, idx, "floating");
+    if (lua_istable(L, -1)) {
+        int fi = lua_gettop(L);
+        Clay_FloatingElementConfig fc; memset(&fc, 0, sizeof(fc));
+        fc.attachTo = CLAY_ATTACH_TO_PARENT;
+
+        lua_getfield(L, fi, "to");
+        const char *to = lua_tostring(L, -1);
+        if (to) {
+            if (strcmp(to, "root") == 0)        fc.attachTo = CLAY_ATTACH_TO_ROOT;
+            else if (strcmp(to, "parent") == 0) fc.attachTo = CLAY_ATTACH_TO_PARENT;
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, fi, "to_id");
+        const char *to_id = lua_tostring(L, -1);
+        if (to_id && to_id[0]) {
+            fc.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID;
+            fc.parentId = Clay_GetElementId(clay_cstr(to_id)).id;
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, fi, "attach");
+        if (lua_isstring(L, -1)) {
+            const char *a = lua_tostring(L, -1);
+            Clay_FloatingAttachPointType el = CLAY_ATTACH_POINT_LEFT_TOP, pa = CLAY_ATTACH_POINT_LEFT_TOP;
+            if      (strcmp(a, "below") == 0) { el = CLAY_ATTACH_POINT_CENTER_TOP;    pa = CLAY_ATTACH_POINT_CENTER_BOTTOM; }
+            else if (strcmp(a, "above") == 0) { el = CLAY_ATTACH_POINT_CENTER_BOTTOM; pa = CLAY_ATTACH_POINT_CENTER_TOP; }
+            else if (strcmp(a, "right") == 0) { el = CLAY_ATTACH_POINT_LEFT_CENTER;   pa = CLAY_ATTACH_POINT_RIGHT_CENTER; }
+            else if (strcmp(a, "left")  == 0) { el = CLAY_ATTACH_POINT_RIGHT_CENTER;  pa = CLAY_ATTACH_POINT_LEFT_CENTER; }
+            else if (strcmp(a, "center")== 0) { el = CLAY_ATTACH_POINT_CENTER_CENTER; pa = CLAY_ATTACH_POINT_CENTER_CENTER; }
+            fc.attachPoints = (Clay_FloatingAttachPoints){ .element = el, .parent = pa };
+        } else if (lua_istable(L, -1)) {
+            int ai = lua_gettop(L);
+            lua_getfield(L, ai, "element");
+            fc.attachPoints.element = attach_point_from_name(lua_tostring(L, -1));
+            lua_pop(L, 1);
+            lua_getfield(L, ai, "parent");
+            fc.attachPoints.parent = attach_point_from_name(lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+
+        lua_getfield(L, fi, "x"); if (lua_isnumber(L, -1)) fc.offset.x = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_getfield(L, fi, "y"); if (lua_isnumber(L, -1)) fc.offset.y = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_getfield(L, fi, "z"); if (lua_isnumber(L, -1)) fc.zIndex = (int16_t)lua_tointeger(L, -1); lua_pop(L, 1);
+
+        lua_getfield(L, fi, "passthrough");
+        fc.pointerCaptureMode = lua_toboolean(L, -1)
+            ? CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH : CLAY_POINTER_CAPTURE_MODE_CAPTURE;
+        lua_pop(L, 1);
+
+        decl->floating = fc;
+    }
+    lua_pop(L, 1);
+}
 
 static void render_node(lua_State *L, int idx);
 
@@ -115,7 +149,6 @@ static void render_node(lua_State *L, int idx) {
     lua_pop(L, 1);
     if (!type) return;
 
-    // ── TEXT ────────────────────────────────────────────────────────────────
     if (strcmp(type, "text") == 0) {
         lua_getfield(L, idx, "text");
         const char *txt = lua_tostring(L, -1);
@@ -145,16 +178,11 @@ static void render_node(lua_State *L, int idx) {
         return;
     }
 
-    // ── FRAME / SCROLL / IMAGE ───────────────────────────────────────────────
-    // An `image` is a frame whose background is a texture/nine-patch instead of a
-    // solid colour: it shares all id/layout/border/event plumbing, and only adds
-    // the image config below. That keeps skinned buttons fully interactive.
     if (strcmp(type, "frame") == 0 || strcmp(type, "scroll") == 0 ||
         strcmp(type, "image") == 0) {
         Clay_ElementDeclaration decl;
         memset(&decl, 0, sizeof(decl));
 
-        // ID
         char id_copy[64] = {0};
         lua_getfield(L, idx, "id");
         const char *id_str = lua_tostring(L, -1);
@@ -164,7 +192,6 @@ static void render_node(lua_State *L, int idx) {
             decl.id = Clay_GetElementId(clay_cstr(id_copy));
         }
 
-        // Layout
         lua_getfield(L, idx, "layout");
         if (lua_istable(L, -1)) {
             int li = lua_gettop(L);
@@ -188,7 +215,6 @@ static void render_node(lua_State *L, int idx) {
             if (lua_isnumber(L, -1)) layout.childGap = (uint16_t)lua_tointeger(L, -1);
             lua_pop(L, 1);
 
-            // pad: number (uniform) or {h, v} or {left, right, top, bottom}
             lua_getfield(L, li, "pad");
             if (!lua_isnil(L, -1)) {
                 if (lua_isnumber(L, -1)) {
@@ -209,7 +235,6 @@ static void render_node(lua_State *L, int idx) {
             }
             lua_pop(L, 1);
 
-            // align: "center" or {x="center", y="center"}
             lua_getfield(L, li, "align");
             if (!lua_isnil(L, -1)) {
                 if (lua_isstring(L, -1)) {
@@ -238,33 +263,39 @@ static void render_node(lua_State *L, int idx) {
 
             decl.layout = layout;
         }
-        lua_pop(L, 1); // pop layout value (table or nil)
+        lua_pop(L, 1);
 
-        // Background colour
         lua_getfield(L, idx, "bg");
         if (!lua_isnil(L, -1)) decl.backgroundColor = color_from_lua(L, lua_gettop(L));
         lua_pop(L, 1);
 
-        // Uniform corner radius
         lua_getfield(L, idx, "radius");
         if (lua_isnumber(L, -1)) {
             float r = (float)lua_tonumber(L, -1);
             decl.cornerRadius = (Clay_CornerRadius){ r, r, r, r };
+        } else if (lua_istable(L, -1)) {
+            int ri = lua_gettop(L);
+            lua_getfield(L, ri, "tl"); decl.cornerRadius.topLeft     = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+            lua_getfield(L, ri, "tr"); decl.cornerRadius.topRight    = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+            lua_getfield(L, ri, "bl"); decl.cornerRadius.bottomLeft  = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+            lua_getfield(L, ri, "br"); decl.cornerRadius.bottomRight = (float)lua_tonumber(L, -1); lua_pop(L, 1);
         }
         lua_pop(L, 1);
 
-        // Scroll: a scrolling container is a clip element whose child offset
-        // tracks Clay's scroll state (v_scroll defaults true, h_scroll false).
         if (strcmp(type, "scroll") == 0) {
             bool vs = true, hs = false;
             lua_getfield(L, idx, "v_scroll"); if (!lua_isnil(L,-1)) vs = lua_toboolean(L,-1); lua_pop(L,1);
             lua_getfield(L, idx, "h_scroll"); if (!lua_isnil(L,-1)) hs = lua_toboolean(L,-1); lua_pop(L,1);
+            Clay_Vector2 off = { 0, 0 };
+            if (decl.id.id != 0) {
+                Clay_ScrollContainerData d = Clay_GetScrollContainerData(decl.id);
+                if (d.found && d.scrollPosition) off = *d.scrollPosition;
+            }
             decl.clip = (Clay_ClipElementConfig){
-                .horizontal = hs, .vertical = vs, .childOffset = Clay_GetScrollOffset(),
+                .horizontal = hs, .vertical = vs, .childOffset = off,
             };
         }
 
-        // Border: {color={r,g,b,a}, width=n} — v0.14 uses one color + per-side widths.
         lua_getfield(L, idx, "border");
         if (lua_istable(L, -1)) {
             int bi = lua_gettop(L);
@@ -279,9 +310,6 @@ static void render_node(lua_State *L, int idx) {
         }
         lua_pop(L, 1);
 
-        // Image background: resolving `nine` (a nine-patch id) or `tex` (a texture
-        // id) turns this element into an IMAGE render command. `nine` wins. An
-        // invalid/absent id leaves it a plain frame — graceful opt-in fallback.
         if (strcmp(type, "image") == 0) {
             const void *image_data = NULL;
             lua_getfield(L, idx, "nine");
@@ -294,8 +322,6 @@ static void render_node(lua_State *L, int idx) {
             }
             if (image_data) {
                 decl.image.imageData = (void *)image_data;
-                // Clay treats backgroundColor as a tint for image elements;
-                // `tint` overrides any `bg` set above.
                 lua_getfield(L, idx, "tint");
                 if (!lua_isnil(L, -1)) decl.backgroundColor = color_from_lua(L, lua_gettop(L));
                 lua_pop(L, 1);
@@ -305,67 +331,8 @@ static void render_node(lua_State *L, int idx) {
             }
         }
 
-        // Floating: lifts the element out of flow and layers it over siblings in z
-        // order (tooltips, dropdowns, modals). { to="parent"|"root" | to_id="<id>",
-        //   attach=<preset>|{element=,parent=}, x=, y=, z=, passthrough=bool }
-        lua_getfield(L, idx, "floating");
-        if (lua_istable(L, -1)) {
-            int fi = lua_gettop(L);
-            Clay_FloatingElementConfig fc; memset(&fc, 0, sizeof(fc));
-            fc.attachTo = CLAY_ATTACH_TO_PARENT;   // default if any floating config present
+        parse_floating(L, idx, &decl);
 
-            lua_getfield(L, fi, "to");
-            const char *to = lua_tostring(L, -1);
-            if (to) {
-                if (strcmp(to, "root") == 0)        fc.attachTo = CLAY_ATTACH_TO_ROOT;
-                else if (strcmp(to, "parent") == 0) fc.attachTo = CLAY_ATTACH_TO_PARENT;
-            }
-            lua_pop(L, 1);
-
-            lua_getfield(L, fi, "to_id");
-            const char *to_id = lua_tostring(L, -1);
-            if (to_id && to_id[0]) {
-                fc.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID;
-                fc.parentId = Clay_GetElementId(clay_cstr(to_id)).id;
-            }
-            lua_pop(L, 1);
-
-            // attach: preset string or explicit { element=, parent= }
-            lua_getfield(L, fi, "attach");
-            if (lua_isstring(L, -1)) {
-                const char *a = lua_tostring(L, -1);
-                Clay_FloatingAttachPointType el = CLAY_ATTACH_POINT_LEFT_TOP, pa = CLAY_ATTACH_POINT_LEFT_TOP;
-                if      (strcmp(a, "below") == 0) { el = CLAY_ATTACH_POINT_CENTER_TOP;    pa = CLAY_ATTACH_POINT_CENTER_BOTTOM; }
-                else if (strcmp(a, "above") == 0) { el = CLAY_ATTACH_POINT_CENTER_BOTTOM; pa = CLAY_ATTACH_POINT_CENTER_TOP; }
-                else if (strcmp(a, "right") == 0) { el = CLAY_ATTACH_POINT_LEFT_CENTER;   pa = CLAY_ATTACH_POINT_RIGHT_CENTER; }
-                else if (strcmp(a, "left")  == 0) { el = CLAY_ATTACH_POINT_RIGHT_CENTER;  pa = CLAY_ATTACH_POINT_LEFT_CENTER; }
-                else if (strcmp(a, "center")== 0) { el = CLAY_ATTACH_POINT_CENTER_CENTER; pa = CLAY_ATTACH_POINT_CENTER_CENTER; }
-                fc.attachPoints = (Clay_FloatingAttachPoints){ .element = el, .parent = pa };
-            } else if (lua_istable(L, -1)) {
-                int ai = lua_gettop(L);
-                lua_getfield(L, ai, "element");
-                fc.attachPoints.element = attach_point_from_name(lua_tostring(L, -1));
-                lua_pop(L, 1);
-                lua_getfield(L, ai, "parent");
-                fc.attachPoints.parent = attach_point_from_name(lua_tostring(L, -1));
-                lua_pop(L, 1);
-            }
-            lua_pop(L, 1);
-
-            lua_getfield(L, fi, "x"); if (lua_isnumber(L, -1)) fc.offset.x = (float)lua_tonumber(L, -1); lua_pop(L, 1);
-            lua_getfield(L, fi, "y"); if (lua_isnumber(L, -1)) fc.offset.y = (float)lua_tonumber(L, -1); lua_pop(L, 1);
-            lua_getfield(L, fi, "z"); if (lua_isnumber(L, -1)) fc.zIndex = (int16_t)lua_tointeger(L, -1); lua_pop(L, 1);
-
-            lua_getfield(L, fi, "passthrough");
-            fc.pointerCaptureMode = lua_toboolean(L, -1)
-                ? CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH : CLAY_POINTER_CAPTURE_MODE_CAPTURE;
-            lua_pop(L, 1);
-
-            decl.floating = fc;
-        }
-        lua_pop(L, 1);
-
-        // Register Lua event callbacks for this element (by ID)
         if (id_copy[0] && g_event_count < MAX_UI_EVENTS) {
             UIEventEntry *e = &g_events[g_event_count++];
             strncpy(e->id_str, id_copy, 63);
@@ -388,9 +355,6 @@ static void render_node(lua_State *L, int idx) {
         return;
     }
 
-    // ── CUSTOM (seam) ─────────────────────────────────────────────────────────
-    // { _type="custom", kind=<int>, layout={ w=, h= } }. Reserves a laid-out rect;
-    // at render time the registered GramaryeUI_CustomDrawFn draws into it.
     if (strcmp(type, "custom") == 0) {
         int kind = 0;
         lua_getfield(L, idx, "kind");
@@ -413,6 +377,8 @@ static void render_node(lua_State *L, int idx) {
         }
         lua_pop(L, 1);
 
+        parse_floating(L, idx, &decl);
+
         Clay__OpenElement();
         Clay__ConfigureOpenElement(decl);
         render_children(L, idx);
@@ -421,18 +387,12 @@ static void render_node(lua_State *L, int idx) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lua bindings: gramarye.ui.*
-// ---------------------------------------------------------------------------
-
-// gramarye.ui.render(node, ...)  — render one or more element trees this frame
 static int l_ui_render(lua_State *L) {
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) render_node(L, i);
     return 0;
 }
 
-// gramarye.ui.hovered(id) → bool  — one-frame lag; safe to call during layout
 static int l_ui_hovered(lua_State *L) {
     const char *id = luaL_checkstring(L, 1);
     Clay_ElementId eid = Clay_GetElementId(clay_cstr(id));
@@ -443,11 +403,29 @@ static int l_ui_hovered(lua_State *L) {
     return 1;
 }
 
-// gramarye.ui.screen_w() / screen_h()  — actual window dimensions (not virtual)
 static int l_ui_screen_w(lua_State *L) { lua_pushinteger(L, GetScreenWidth());  return 1; }
 static int l_ui_screen_h(lua_State *L) { lua_pushinteger(L, GetScreenHeight()); return 1; }
 
-// gramarye.ui.load_texture(path) → id | nil  — caller prepends any asset prefix.
+static int l_ui_mouse_pos(lua_State *L) {
+#if defined(__ANDROID__)
+    Vector2 p = GetTouchPointCount() > 0 ? GetTouchPosition(0) : (Vector2){ -1, -1 };
+#else
+    Vector2 p = GetMousePosition();
+#endif
+    lua_pushnumber(L, p.x);
+    lua_pushnumber(L, p.y);
+    return 2;
+}
+
+static int l_ui_mouse_down(lua_State *L) {
+#if defined(__ANDROID__)
+    lua_pushboolean(L, GetTouchPointCount() > 0);
+#else
+    lua_pushboolean(L, IsMouseButtonDown(MOUSE_BUTTON_LEFT));
+#endif
+    return 1;
+}
+
 static int l_ui_load_texture(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     int id = GramaryeUI_load_texture(path);
@@ -456,7 +434,6 @@ static int l_ui_load_texture(lua_State *L) {
     return 1;
 }
 
-// gramarye.ui.texture_size(id) → w, h  (0, 0 if the id is invalid)
 static int l_ui_texture_size(lua_State *L) {
     const Texture2D *t = GramaryeUI_texture((int)luaL_checkinteger(L, 1));
     lua_pushinteger(L, t ? t->width  : 0);
@@ -464,7 +441,6 @@ static int l_ui_texture_size(lua_State *L) {
     return 2;
 }
 
-// gramarye.ui.ninepatch(tex_id, sx,sy,sw,sh, l,t,r,b) → id | nil
 static int l_ui_ninepatch(lua_State *L) {
     int tex_id = (int)luaL_checkinteger(L, 1);
     Rectangle src = { (float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3),
@@ -477,11 +453,8 @@ static int l_ui_ninepatch(lua_State *L) {
     return 1;
 }
 
-// gramarye.ui.time() → seconds since start (raylib GetTime); for caret blink / anim.
 static int l_ui_time(lua_State *L) { lua_pushnumber(L, GetTime()); return 1; }
 
-// gramarye.ui.text_input() → UTF-8 string of characters typed this frame ("" if none).
-// Drains raylib's char queue, so call it once per frame from the focused widget.
 static int l_ui_text_input(lua_State *L) {
     luaL_Buffer b;
     luaL_buffinit(L, &b);
@@ -495,8 +468,6 @@ static int l_ui_text_input(lua_State *L) {
     return 1;
 }
 
-// gramarye.ui.edit_key(name) → bool: pressed or auto-repeating this frame.
-// Self-contained editing keys for text widgets (no host input dependency).
 static int l_ui_edit_key(lua_State *L) {
     const char *n = luaL_checkstring(L, 1);
     int key = 0;
@@ -515,7 +486,6 @@ static int l_ui_edit_key(lua_State *L) {
     return 1;
 }
 
-// gramarye.ui.measure_text(text, size [, font]) → width, height (registered font).
 static int l_ui_measure_text(lua_State *L) {
     const char *txt = luaL_optstring(L, 1, "");
     float size = (float)luaL_checknumber(L, 2);
@@ -528,8 +498,6 @@ static int l_ui_measure_text(lua_State *L) {
     return 2;
 }
 
-// gramarye.ui.scroll_info(id) → offset_y, viewport_h, content_h (0,0,0 if no such
-// scroll container yet). offset_y grows as you scroll down. One-frame lag.
 static int l_ui_scroll_info(lua_State *L) {
     const char *id = luaL_checkstring(L, 1);
     Clay_ScrollContainerData d = Clay_GetScrollContainerData(Clay_GetElementId(clay_cstr(id)));
@@ -543,13 +511,51 @@ static int l_ui_scroll_info(lua_State *L) {
     return 3;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+static int l_ui_element_rect(lua_State *L) {
+    const char *id = luaL_checkstring(L, 1);
+    Clay_ElementData d = Clay_GetElementData(Clay_GetElementId(clay_cstr(id)));
+    if (!d.found) {
+        lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
+        return 4;
+    }
+    lua_pushnumber(L, d.boundingBox.x);
+    lua_pushnumber(L, d.boundingBox.y);
+    lua_pushnumber(L, d.boundingBox.width);
+    lua_pushnumber(L, d.boundingBox.height);
+    return 4;
+}
 
-// Inject the embedded modules into package.preload so require("gramarye.ui") /
-// require("gramarye.theme") resolve straight from the binary — no filesystem.
-// Chunks run lazily on first require, so insertion order doesn't matter.
+static int l_ui_set_border_beam(lua_State *L) {
+    int slot = (int)luaL_checkinteger(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    Color beam = { 255, 255, 255, 255 };
+    Color base = { 80, 80, 110, 255 };
+    float radius = 8.0f, border_w = 1.0f, speed = 60.0f, glow_radius = 40.0f;
+
+    lua_getfield(L, 2, "beam");
+    if (lua_istable(L, -1)) beam = CLAY_COLOR_TO_RAYLIB_COLOR(color_from_lua(L, lua_gettop(L)));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "base");
+    if (lua_istable(L, -1)) base = CLAY_COLOR_TO_RAYLIB_COLOR(color_from_lua(L, lua_gettop(L)));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "radius");       if (lua_isnumber(L, -1)) radius      = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 2, "border_width"); if (lua_isnumber(L, -1)) border_w    = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 2, "speed");        if (lua_isnumber(L, -1)) speed       = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    lua_getfield(L, 2, "glow_radius");  if (lua_isnumber(L, -1)) glow_radius = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+
+    GramaryeUI_set_border_beam(slot, beam, base, radius, border_w, speed, glow_radius);
+    return 0;
+}
+
+static int l_ui_border_beam_kind(lua_State *L) {
+    int slot = (int)luaL_checkinteger(L, 1);
+    lua_pushinteger(L, GRAMARYE_UI_BEAM_KIND_BASE + slot);
+    return 1;
+}
+
 static void gramarye_ui_preload_modules(lua_State *L) {
     lua_getglobal(L, "package");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
@@ -562,14 +568,14 @@ static void gramarye_ui_preload_modules(lua_State *L) {
         char chunk[128];
         snprintf(chunk, sizeof(chunk), "@gramarye-ui:%s", m->name);
         if (luaL_loadbuffer(L, m->src, (size_t)m->len, chunk) == LUA_OK) {
-            lua_setfield(L, -2, m->name);   // package.preload[name] = chunk
+            lua_setfield(L, -2, m->name);
         } else {
             TraceLog(LOG_ERROR, "gramarye-ui: embedded module '%s' failed: %s",
                      m->name, lua_tostring(L, -1));
             lua_pop(L, 1);
         }
     }
-    lua_pop(L, 2);  // preload, package
+    lua_pop(L, 2);
 }
 
 void GramaryeUI_register_lua(lua_State *L) {
@@ -585,16 +591,16 @@ void GramaryeUI_register_lua(lua_State *L) {
     lua_getglobal(L, "gramarye");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
 
-    // gramarye.platform = "desktop" | "android" | "web"
     lua_pushstring(L, platform);
     lua_setfield(L, -2, "platform");
 
-    // gramarye.ui = { render, hovered, screen_w, screen_h }
     static const luaL_Reg ui_fns[] = {
         {"render",       l_ui_render},
         {"hovered",      l_ui_hovered},
         {"screen_w",     l_ui_screen_w},
         {"screen_h",     l_ui_screen_h},
+        {"mouse_pos",    l_ui_mouse_pos},
+        {"mouse_down",   l_ui_mouse_down},
         {"load_texture", l_ui_load_texture},
         {"texture_size", l_ui_texture_size},
         {"ninepatch",    l_ui_ninepatch},
@@ -603,21 +609,20 @@ void GramaryeUI_register_lua(lua_State *L) {
         {"edit_key",     l_ui_edit_key},
         {"measure_text", l_ui_measure_text},
         {"scroll_info",  l_ui_scroll_info},
+        {"element_rect", l_ui_element_rect},
+        {"set_border_beam",  l_ui_set_border_beam},
+        {"border_beam_kind", l_ui_border_beam_kind},
         {NULL, NULL}
     };
     lua_newtable(L);
     luaL_setfuncs(L, ui_fns, 0);
     lua_setfield(L, -2, "ui");
 
-    lua_pop(L, 1); // pop gramarye
+    lua_pop(L, 1);
 
-    // Make the embedded gramarye.ui / gramarye.theme modules requirable.
     gramarye_ui_preload_modules(L);
 }
 
-// Call after GramaryeUI_end_and_render() each frame.
-// Fires on_click / on_hover callbacks, updates hover set for next frame,
-// and releases Lua refs allocated during render.
 void GramaryeUI_dispatch_events(lua_State *L) {
 #if defined(__ANDROID__)
     int tc = GetTouchPointCount();

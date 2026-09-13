@@ -70,10 +70,12 @@ if(GRAMARYE_UI_LUA)
     set(GRAMARYE_LUA_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
     set(GRAMARYE_LUA_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/theme.lua"
-        "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/ui.lua")
+        "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/ui.lua"
+        "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/anim.lua")
     gramarye_embed_lua("${GRAMARYE_LUA_GEN_DIR}/gramarye_ui_lua_modules.h"
         "gramarye.theme" "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/theme.lua"
-        "gramarye.ui"    "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/ui.lua")
+        "gramarye.ui"    "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/ui.lua"
+        "gramarye.anim"  "${CMAKE_CURRENT_SOURCE_DIR}/lua/gramarye/anim.lua")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GRAMARYE_LUA_SOURCES})
     target_include_directories(gramarye-ui PRIVATE "${GRAMARYE_LUA_GEN_DIR}")
 endif()

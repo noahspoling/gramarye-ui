@@ -84,15 +84,8 @@ demo struct), and a `TraceLog` warning instead of `exit(1)` on an unknown
 command in the default case. Text/rectangle/border/scissor handling is
 byte-for-byte the upstream behavior. It is included directly into
 `gramarye_ui.c` (not compiled standalone) after `clay.h` and after the
-nine-patch descriptor / custom-draw globals are defined.
-
-The border-beam effect (`GramaryeUI_set_border_beam`, up to
-`GRAMARYE_UI_MAX_BORDER_BEAMS` concurrent slots) draws an SDF rounded-rect
-border with two glow "heads" whose position is computed at draw time — so it
-tracks the element's actual this-frame bounding box with zero extra lag —
-using Euclidean distance to each head (not just distance-along-the-border),
-which is what makes the glow bleed diagonally into the interior near each head
-instead of staying a thin ring.
+nine-patch descriptor / custom-draw globals are defined. Each command type has
+its own `draw_*` function; `Clay_Raylib_Render` is just the dispatch switch.
 
 Text measurement (`Raylib_MeasureText`) walks UTF-8 codepoints rather than raw
 bytes, so multibyte glyphs (×, →, …) measure correctly and match what
@@ -126,9 +119,7 @@ Build with `-DGRAMARYE_UI_LUA=ON` (needs a `lua_static` target). This compiles
 | `gramarye.ui.edit_key(name) -> bool` | pressed or auto-repeating this frame; self-contained editing keys (`backspace`, `delete`, `left`, `right`, `home`, `end`, `escape`, `enter`) for text widgets, no host input dependency |
 | `gramarye.ui.measure_text(text, size [, font]) -> w, h` | measured with a registered font |
 | `gramarye.ui.scroll_info(id) -> offset_y, viewport_h, content_h` | `0,0,0` if no such scroll container yet; `offset_y` grows as you scroll down; one-frame lag |
-| `gramarye.ui.element_rect(id) -> x, y, w, h` | all `0` if not laid out yet; one-frame lag, same as `hovered()`/`scroll_info()`; lets Lua position an overlay (e.g. a border-pulse effect) around an element whose size isn't known ahead of layout, like a fit-sized Popup |
-| `gramarye.ui.set_border_beam(slot, {beam=, base=, radius=, border_width=, speed=, glow_radius=})` | configure a border-beam slot; cheap, safe to call every frame the effect is visible; pair with a `custom` node whose kind is `border_beam_kind(slot)` |
-| `gramarye.ui.border_beam_kind(slot) -> int` | the `kind` a `custom` node needs to render that beam slot |
+| `gramarye.ui.element_rect(id) -> x, y, w, h` | all `0` if not laid out yet; one-frame lag, same as `hovered()`/`scroll_info()`; lets Lua position an overlay around an element whose size isn't known ahead of layout, like a fit-sized Popup (e.g. to anchor an overlay) |
 | `gramarye.platform` | `"desktop" \| "android" \| "web"` |
 
 Element-tree node types (`_type`): `text`, `frame`, `scroll`, `image`, `custom`.
@@ -141,7 +132,7 @@ buttons stay interactive. `custom` reserves a laid-out rect (`kind=<int>`) for
 `{ grow = true }` (`GROW`), `{ pct = n }` (`PERCENT`), or nothing (`FIT`).
 
 Any `frame`/`image`/`custom` node can carry a `floating` field to be
-positioned out-of-flow (tooltips, dropdowns, modals, border-beam overlays):
+positioned out-of-flow (tooltips, dropdowns, modals):
 `{ to = "parent" | "root", to_id = "<id>", attach = <preset> | { element =, parent = },
 x =, y =, z =, passthrough = bool }`. `to_id` (attach to a specific element by
 id) takes precedence over `to`. `attach` presets are `"below"`, `"above"`,
@@ -275,30 +266,6 @@ Richer, stateful components:
   ```lua
   ui.Tooltip { to_id = "save_btn", text = "Save the game" }
   ```
-- **BorderPulse** — a ring traced around a rect's perimeter that fades from a
-  base color to a glow color in two moving bands, built from many small
-  overlapping segments (dense enough to read as a continuous blend) rather
-  than a sparse chain of dots. Pure Lua overlay, no shader.
-  ```lua
-  ui.BorderPulse { x=100, y=80, w=320, h=220,
-                    base={60,60,90,255}, glow={255,255,255,255},
-                    speed=60, band=0.14 }
-  ```
-  `x/y/w/h` are the target's absolute screen rect; `band` is each glow zone's
-  width as a fraction of the perimeter (0..0.5, wider = softer/broader fade).
-- **BorderBeam** — shader-backed traveling border glow (real additive GPU
-  blending via `gramarye.ui.set_border_beam` + a `custom` node — see
-  `gramarye_ui.c`'s border-beam shader for the math), softer and brighter than
-  `BorderPulse`. `id` should be stable per on-screen instance: it picks a beam
-  slot and keeps it for the id's lifetime (slots aren't reclaimed, and there
-  are only `GRAMARYE_UI_MAX_BORDER_BEAMS` (16) of them — meant for a handful of
-  concurrently-highlighted panels, not one per list row). If the shader failed
-  to compile (logged once as a warning), this silently draws nothing.
-  ```lua
-  ui.BorderBeam { id="win", x=100, y=80, w=320, h=220, radius=8,
-                   beam={255,255,255,255}, base={60,60,90,255},
-                   speed=60, glow_radius=40 }
-  ```
 - **Popup** — a free-floating, draggable panel positioned in screen space
   (drag by its title bar). Position/drag state persists per id across frames
   and across the popup being hidden and shown again — the caller owns
@@ -308,11 +275,7 @@ Richer, stateful components:
              on_close = function() state.show_inv = false end,
              ui.Label "contents go here" }
   ```
-  `pulse = true` (or a props table for `BorderPulse`, e.g. `pulse = { color=... }`)
-  wraps it with a traveling border glow sized off the popup's actual on-screen
-  rect via `gramarye.ui.element_rect()` — accurate even when `h` is left to
-  content-fit; the very first frame it's shown the rect isn't laid out yet, so
-  the pulse silently sits out that frame. Only the title bar's top corners are
+  Only the title bar's top corners are
   rounded to match the popup's radius — Clay doesn't clip a child's background
   to its parent's radius, so a fully-square bar would visibly overhang the
   outer frame's rounded top corners. Dragging is clamped so the title bar (the

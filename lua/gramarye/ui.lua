@@ -3,8 +3,6 @@ local anim  = require("gramarye.anim")
 
 local M = {}
 
-local is_mobile = gramarye.platform == "android"
-
 M.skins     = theme.skins
 M.MIN_TAP_H = theme.MIN_TAP_H
 
@@ -14,13 +12,25 @@ local function image_for(skin_name)
     return img.nine, img.tex
 end
 
-function M.Frame(props)
-    local node = { _type = "frame" }
-    for k, v in pairs(props) do
-        node[k] = v
-    end
+-- Copy the positional children (props[1], props[2], ...) onto a node.
+local function add_children(node, props)
+    for i, v in ipairs(props) do node[i] = v end
     return node
 end
+
+-- ========================================================================
+-- Raw nodes: thin wrappers that pass props straight to the C renderer
+-- ========================================================================
+
+local function raw(node_type, props)
+    local node = { _type = node_type }
+    for k, v in pairs(props) do node[k] = v end
+    return node
+end
+
+function M.Frame(props)       return raw("frame",  props) end
+function M.Image(props)       return raw("image",  props) end
+function M.ScrollFrame(props) return raw("scroll", props) end
 
 function M.Text(props)
     if type(props) == "string" then
@@ -35,26 +45,21 @@ function M.Text(props)
     }
 end
 
-function M.Image(props)
-    local node = { _type = "image" }
-    for k, v in pairs(props) do node[k] = v end
-    return node
-end
+-- ========================================================================
+-- Layout
+-- ========================================================================
 
-function M.ScrollFrame(props)
-    local node = { _type = "scroll" }
-    for k, v in pairs(props) do node[k] = v end
-    return node
-end
-
-function M.Row(props)
-    local node = {
+-- Row and Column take flat props (w, h, gap, pad, align) instead of a
+-- nested layout table, plus children.
+local function box(dir, props)
+    return add_children({
         _type  = "frame",
         id     = props.id,
         bg     = props.bg,
         radius = props.radius,
         border = props.border,
         layout = {
+            dir   = dir,
             w     = props.w,
             h     = props.h,
             gap   = props.gap or 8,
@@ -63,32 +68,11 @@ function M.Row(props)
         },
         on_click = props.on_click,
         on_hover = props.on_hover,
-    }
-    for i, v in ipairs(props) do node[i] = v end
-    return node
+    }, props)
 end
 
-function M.Column(props)
-    local node = {
-        _type  = "frame",
-        id     = props.id,
-        bg     = props.bg,
-        radius = props.radius,
-        border = props.border,
-        layout = {
-            dir   = "column",
-            w     = props.w,
-            h     = props.h,
-            gap   = props.gap or 8,
-            pad   = props.pad,
-            align = props.align,
-        },
-        on_click = props.on_click,
-        on_hover = props.on_hover,
-    }
-    for i, v in ipairs(props) do node[i] = v end
-    return node
-end
+function M.Row(props)    return box(nil,      props) end
+function M.Column(props) return box("column", props) end
 
 function M.Spacer(size)
     if size and size > 0 then
@@ -110,6 +94,10 @@ function M.Separator(props)
         },
     }
 end
+
+-- ========================================================================
+-- Text
+-- ========================================================================
 
 function M.Label(props)
     if type(props) == "string" then
@@ -139,6 +127,10 @@ function M.Title(props)
         color = props.color or s.color,
     }
 end
+
+-- ========================================================================
+-- Skinned widgets (Button fades on hover via gramarye.ui.hovered(id), one frame late)
+-- ========================================================================
 
 function M.Button(props)
     local hov       = gramarye.ui.hovered(props.id)
@@ -203,9 +195,12 @@ function M.Panel(props)
         },
         on_click = props.on_click,
     }
-    for i, v in ipairs(props) do node[i] = v end
-    return node
+    return add_children(node, props)
 end
+
+-- ========================================================================
+-- Floating: overlays, tooltips, popups, dropdowns
+-- ========================================================================
 
 function M.Overlay(props)
     local node = {
@@ -214,8 +209,7 @@ function M.Overlay(props)
         bg     = props.bg or {0, 0, 0, 180},
         layout = { w = { grow = true }, h = { grow = true }, align = "center" },
     }
-    for i, v in ipairs(props) do node[i] = v end
-    return node
+    return add_children(node, props)
 end
 
 function M.Tooltip(props)
@@ -240,109 +234,10 @@ function M.Tooltip(props)
             node[1] = { _type = "text", text = props.text,
                         size = props.font_size or s.font_size, color = props.text_color or s.text }
         else
-            for i, v in ipairs(props) do node[i] = v end
+            add_children(node, props)
         end
     end
     return node
-end
-
-local function point_on_rect(x, y, w, h, d)
-    local perim = 2 * (w + h)
-    if perim <= 0 then return x, y end
-    d = d % perim
-    if d < w then                     return x + d,               y
-    elseif d < w + h then             return x + w,                y + (d - w)
-    elseif d < w + h + w then         return x + w - (d - w - h),  y + h
-    else                              return x,                    y + h - (d - w - h - w)
-    end
-end
-
-local function glow_falloff(d, center, perim, band_px)
-    local delta = (d - center + perim / 2) % perim - perim / 2
-    if delta < -band_px or delta > band_px then return 0 end
-    return 0.5 * (1 + math.cos(math.pi * delta / band_px))
-end
-
-function M.BorderPulse(props)
-    local x, y, w, h = props.x, props.y, props.w, props.h
-    if not (x and y and w and h) or w <= 0 or h <= 0 then
-        return { _type = "frame", layout = { w = 0, h = 0 } }
-    end
-    local base  = props.base  or { 60, 60, 90, 255 }
-    local glow  = props.glow  or { 255, 255, 255, 255 }
-    local speed = props.speed or 60
-    local band  = props.band  or 0.14
-    local step  = props.step  or 5
-    local width = props.width or 3
-    local z     = props.z or 850
-
-    local perim   = 2 * (w + h)
-    local band_px = math.max(band * perim, 1)
-    local head1   = (gramarye.ui.time() * speed) % perim
-    local head2   = (head1 + perim / 2) % perim
-    local seg_sz  = math.max(width, step * 1.4)
-
-    local node = { _type = "frame", layout = { w = 0, h = 0 } }
-    local n = 0
-    local count = math.min(math.floor(perim / step), 400)
-    for i = 0, count - 1 do
-        local d = i * step
-        local t = math.max(glow_falloff(d, head1, perim, band_px),
-                            glow_falloff(d, head2, perim, band_px))
-        if t > 0.02 then
-            local px, py = point_on_rect(x, y, w, h, d)
-            n = n + 1
-            node[n] = {
-                _type    = "frame",
-                bg       = { base[1] + (glow[1]-base[1])*t,
-                             base[2] + (glow[2]-base[2])*t,
-                             base[3] + (glow[3]-base[3])*t,
-                             base[4] + (glow[4]-base[4])*t },
-                radius   = seg_sz / 2,
-                floating = { to = "root", x = px - seg_sz / 2, y = py - seg_sz / 2,
-                             z = z, passthrough = true },
-                layout   = { w = seg_sz, h = seg_sz },
-            }
-        end
-    end
-    return node
-end
-
-local beam_slots     = {}
-local beam_next_slot = 0
-
-local function beam_slot_for(id)
-    local slot = beam_slots[id]
-    if not slot then
-        slot = beam_next_slot
-        beam_next_slot = beam_next_slot + 1
-        beam_slots[id] = slot
-    end
-    return slot
-end
-
-function M.BorderBeam(props)
-    local x, y, w, h = props.x, props.y, props.w, props.h
-    if not (x and y and w and h) or w <= 0 or h <= 0 then
-        return { _type = "frame", layout = { w = 0, h = 0 } }
-    end
-    local slot = beam_slot_for(props.id or "borderbeam")
-
-    gramarye.ui.set_border_beam(slot, {
-        beam         = props.beam or { 255, 255, 255, 255 },
-        base         = props.base or { 60, 60, 90, 255 },
-        radius       = props.radius or 8,
-        border_width = props.border_width or 1,
-        speed        = props.speed or 60,
-        glow_radius  = props.glow_radius or 40,
-    })
-
-    return {
-        _type    = "custom",
-        kind     = gramarye.ui.border_beam_kind(slot),
-        floating = { to = "root", x = x, y = y, z = props.z or 850, passthrough = true },
-        layout   = { w = w, h = h },
-    }
 end
 
 local popup_state = {}
@@ -406,7 +301,7 @@ function M.Popup(props)
         layout = { dir = "column", w = { grow = true }, h = props.body_h,
                    pad = props.pad or 12, gap = props.gap or 8 },
     }
-    for i, v in ipairs(props) do body[i] = v end
+    add_children(body, props)
 
     local win = {
         _type    = "frame",
@@ -418,20 +313,7 @@ function M.Popup(props)
         layout   = { dir = "column", w = w, h = props.h },
         bar, body,
     }
-    if not props.pulse then return win end
-
-    local pp = type(props.pulse) == "table" and props.pulse or {}
-    local rx, ry, rw, rh = gramarye.ui.element_rect(id)
-    return {
-        _type = "frame", layout = { w = 0, h = 0 },
-        win,
-        M.BorderBeam {
-            id = id, x = rx, y = ry, w = rw, h = rh, radius = r,
-            base = pp.base or s.border, beam = pp.beam,
-            speed = pp.speed, glow_radius = pp.glow_radius,
-            border_width = pp.border_width, z = pp.z,
-        },
-    }
+    return win
 end
 
 local dropdown_open = {}
@@ -500,6 +382,10 @@ function M.Dropdown(props)
     }
     return { _type = "frame", trigger, backdrop, list }
 end
+
+-- ========================================================================
+-- Virtualized collections: only visible rows are built
+-- ========================================================================
 
 local function visible_window(scroll_id, total, row_h, fallback_vp)
     local off, vp = gramarye.ui.scroll_info(scroll_id)
@@ -587,6 +473,10 @@ function M.Grid(props)
     if last < rows_n then n = n + 1; node[n] = { _type = "frame", layout = { h = (rows_n - last) * row_h } } end
     return node
 end
+
+-- ========================================================================
+-- Text input
+-- ========================================================================
 
 local tb_active = nil
 local tb_cursor = {}
@@ -677,6 +567,10 @@ function M.TextBox(props)
         table.unpack(children),
     }
 end
+
+-- ========================================================================
+-- Helpers
+-- ========================================================================
 
 function M.grow()        return { grow = true }  end
 function M.pct_w(p)      return { pct = p }       end
